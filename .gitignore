@@ -27,6 +27,16 @@ uploads/
 # Streamlit
 .streamlit/
 
+# Node.js & Web Frontend
+web/node_modules/
+node_modules/
+web/dist/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
 # OS specific
 .DS_Store
 Thumbs.db

@@ -117,75 +117,132 @@ StudySloth is built to run effortlessly on everyday consumer laptops without req
 
 ---
 
-## 🏗️ Architecture & Tech Stack
+## 🏗️ Architecture & Deployment Modes
+
+StudySloth AI supports two distinct deployment modes while preserving 100% on-device AI inference:
+
+```
+[Mode A: Standalone Desktop App (Streamlit)]
+User PC:  Browser (localhost:8501) ──> Streamlit Server ──> Ollama (127.0.0.1:11434)
+
+[Mode B: Hosted Web Frontend (Vercel) + Secure Local Bridge]
+Public:   https://studysloth-ai.vercel.app (Static React/Vite on Vercel CDN)
+             │  (Loopback fetch with X-Bridge-Token & PNA headers)
+             ▼
+User PC:  Bridge (127.0.0.1:8765) ──> Ollama (127.0.0.1:11434)
+
+[Mode C: Universal Local Companion App (Zero Browser Restrictions)]
+User PC:  Browser (http://127.0.0.1:8765) ──> Bridge (serves web/dist) ──> Ollama (127.0.0.1:11434)
+```
 
 ```
 studysloth/
-├── app.py                     # Streamlit frontend & interactive state machine
-├── requirements.txt           # Pinned dependencies
-├── LICENSE                    # MIT Open Source License
-├── README.md                  # Complete documentation & DEV submission guide
-├── utils/
+├── app.py                         # Streamlit standalone application
+├── bridge/
 │   ├── __init__.py
-│   ├── document_processor.py  # Text, PDF, DOCX extraction & sanitization
-│   ├── ollama_client.py       # Ollama REST API client (streaming & health)
-│   ├── prompts.py             # Structured prompt engineering & templates
-│   └── samples.py             # Pre-configured sample study notes
+│   ├── bridge.py                  # Hardened local Python bridge (127.0.0.1:8765)
+│   └── README.md                  # Detailed bridge security architecture
+├── web/                           # Vercel-ready React + Vite frontend
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── vercel.json                # Vercel static deployment configuration
+│   └── src/
+│       ├── App.jsx                # Interactive study workstation UI
+│       ├── index.css              # Custom sloth aesthetic styling
+│       ├── main.jsx
+│       └── samples.js             # Biology, CS, History study presets
+├── utils/
+│   ├── document_processor.py      # Local extraction (TXT, PDF, DOCX) & sanitization
+│   ├── ollama_client.py           # Local Ollama REST client & health check
+│   ├── prompts.py                 # "Slow and Steady" prompt templates & JSON parsers
+│   └── samples.py                 # Built-in study notes
 └── tests/
-    ├── __init__.py
-    ├── test_document_processor.py # 9 unit tests for file handling
-    ├── test_ollama_client.py      # 8 unit tests for API & parsing
-    └── test_prompts.py            # 10 unit tests for prompt formatting
+    ├── test_bridge.py             # 13 tests for pairing, CSRF, DNS rebinding, PNA
+    ├── test_document_processor.py # 9 tests for document processing
+    ├── test_ollama_client.py      # 9 tests for Ollama client & streaming
+    └── test_prompts.py            # 10 tests for prompt templates
 ```
-
-- **Frontend**: [Streamlit](https://streamlit.io/) with custom responsive CSS.
-- **Document Parsers**: `pypdf` for PDF parsing, `python-docx` for Microsoft Word, and multi-encoding decoders for TXT.
-- **AI Engine**: [Ollama](https://ollama.com/) local REST API (`http://localhost:11434`).
-- **Test Framework**: `pytest`.
 
 ---
 
 ## 🚀 Quick Start Guide
 
 ### Step 1: Install Ollama (Local AI Engine)
-1. Download Ollama for Windows, Mac, or Linux from [ollama.com/download](https://ollama.com/download).
-2. Install and launch Ollama.
-3. Open PowerShell or Terminal and pull your preferred lightweight model:
+1. Download Ollama from [ollama.com/download](https://ollama.com/download).
+2. Open PowerShell or Terminal and pull your model:
    ```powershell
    ollama run llama3.2:1b
    ```
-   *(This downloads ~1.3 GB once. Subsequent runs start in milliseconds!)*
 
-### Step 2: Clone & Set Up StudySloth AI
+---
+
+### Option 1: Run the Standalone Streamlit App (Mode A)
 ```powershell
-# 1. Clone repository
-git clone https://github.com/your-username/studysloth-ai.git
-cd studysloth
-
-# 2. Create and activate a Python virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1    # On Windows
-# If PowerShell gives a script execution policy error, simply run:
-# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-# Or on macOS/Linux:
-# source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-```
-
-### Step 3: Run the Application
-```powershell
-# Using the activated environment:
-streamlit run app.py
-
-# Or directly without activation:
+# In PowerShell:
 .\.venv\Scripts\streamlit run app.py
 ```
-Your default web browser will automatically open:
+Opens in your browser at `http://localhost:8501`.
+
+---
+
+### Option 2: Run the Web App with Local Bridge (Mode B / C)
+
+#### 1. Start the Secure Local Bridge
+```powershell
+# In PowerShell:
+.\.venv\Scripts\python bridge/bridge.py
 ```
-http://localhost:8501
+The terminal displays:
 ```
+================================================================
+ 🦥 StudySloth AI Local Bridge Server
+ Status: Running on http://127.0.0.1:8765
+ 🔑 YOUR SESSION PAIRING CODE:  A7B2-C9D4
+================================================================
+```
+
+#### 2. Open the Frontend
+- **On Vercel**: Visit your deployed URL (e.g. `https://studysloth-ai.vercel.app`).
+- **Or via Universal Local Companion Mode**:
+  ```powershell
+  .\.venv\Scripts\python bridge/bridge.py --open
+  ```
+  *(Serves the production build directly from `http://127.0.0.1:8765` with zero mixed-content restrictions across Chrome, Edge, Firefox, and Safari!)*
+
+#### 3. Connect & Pair
+Click the status pill in the top-right corner of the web page, enter your 8-character pairing code (e.g. `A7B2-C9D4`), and click **Pair & Connect**.
+
+---
+
+## 🌐 Deploying the Web Frontend to Vercel
+
+The `web/` directory is 100% ready for zero-configuration deployment on [Vercel](https://vercel.com):
+
+1. Push your repository to GitHub.
+2. In the Vercel Dashboard, click **Add New Project** and select your `studysloth` repository.
+3. Configure the Project Settings:
+   - **Root Directory**: `web`
+   - **Framework Preset**: `Vite`
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+4. Click **Deploy**.
+5. Once deployed, run your local bridge with your specific Vercel URL:
+   ```powershell
+   python bridge/bridge.py --allowed-origin https://your-project.vercel.app
+   ```
+
+---
+
+## 🔒 Security & Browser Compatibility
+
+| Browser | HTTPS-to-Loopback (Vercel) | Universal Companion Mode (`--open`) |
+| :--- | :--- | :--- |
+| **Google Chrome / MS Edge** | Supported via W3C Private Network Access (PNA) | ✅ 100% Supported |
+| **Mozilla Firefox** | Blocks Mixed Content by default | ✅ 100% Supported |
+| **Apple Safari** | Blocks Mixed Content by default | ✅ 100% Supported |
+
+> **Recommendation**: For universal, zero-friction usage across all browsers, use **Universal Local Companion Mode** (`python bridge/bridge.py --open`).
 
 ---
 
@@ -198,7 +255,7 @@ StudySloth is engineered for local-first autonomy with clear, verifiable boundar
    - Open-weight model weights must be pulled from the Ollama library (`ollama run llama3.2:1b`).
 2. **True Offline Verification**:
    - Disconnect your computer from Wi-Fi and Ethernet (or toggle Airplane Mode).
-   - Launch StudySloth: `.\.venv\Scripts\streamlit run app.py`.
+   - Launch StudySloth companion: `.\.venv\Scripts\python bridge/bridge.py --open` (or `.\.venv\Scripts\streamlit run app.py`).
    - Paste study notes or upload a `.txt`, `.pdf`, or `.docx` document.
    - Click **🦥 Generate with StudySloth**.
 3. **Observation**:
@@ -219,7 +276,7 @@ To maintain honesty and technical integrity for judges and users:
 
 ## 🧪 Running the Test Suite
 
-StudySloth comes with a test suite covering document validation, error handling, prompt generation, and mock Ollama streaming.
+StudySloth comes with an automated test suite covering document validation, error handling, prompt generation, Ollama streaming, and bridge security controls.
 
 Run pytest using your virtual environment:
 ```powershell
@@ -228,13 +285,20 @@ Run pytest using your virtual environment:
 
 Expected output:
 ```
-tests/test_document_processor.py::test_extract_text_from_txt_utf8 PASSED       [  3%]
-tests/test_document_processor.py::test_process_uploaded_document_docx PASSED   [ 32%]
-tests/test_ollama_client.py::test_extract_json_block_fenced PASSED             [ 42%]
-tests/test_ollama_client.py::test_extract_json_block_raw_dict PASSED           [ 50%]
-tests/test_prompts.py::test_build_prompt_all_types[flashcards] PASSED          [ 82%]
+tests/test_bridge.py::test_security_manager_pairing_success PASSED       [  2%]
+tests/test_bridge.py::test_security_manager_pairing_failure_and_lockout PASSED [  4%]
+tests/test_bridge.py::test_security_manager_host_validation PASSED       [  7%]
+tests/test_bridge.py::test_security_manager_origin_validation PASSED     [  9%]
+tests/test_bridge.py::test_bridge_options_cors_and_pna PASSED            [ 14%]
+tests/test_bridge.py::test_bridge_pairing_and_authorized_extraction PASSED [ 19%]
+tests/test_bridge.py::test_bridge_dns_rebinding_rejected PASSED          [ 21%]
+tests/test_bridge.py::test_bridge_static_frontend_serving PASSED         [ 29%]
+tests/test_document_processor.py::test_extract_text_from_txt_utf8 PASSED [ 34%]
+tests/test_document_processor.py::test_process_uploaded_document_docx PASSED [ 53%]
+tests/test_ollama_client.py::test_extract_json_block_fenced PASSED       [ 60%]
+tests/test_prompts.py::test_build_prompt_all_types[flashcards] PASSED    [ 87%]
 ...
-============================= 28 passed in 1.67s ==============================
+============================= 41 passed in 6.81s ==============================
 ```
 
 
