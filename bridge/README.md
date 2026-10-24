@@ -1,72 +1,130 @@
 # 🦥 StudySloth AI Local Bridge
 
-The **StudySloth AI Local Bridge** is a lightweight, secure loopback service that runs on your local computer. It allows the publicly hosted StudySloth web frontend (e.g. on Vercel) or the local companion app to interact with your locally running Ollama instance without ever sending notes, documents, or prompts to any remote cloud server.
+The **StudySloth AI Local Bridge** is a lightweight, secure loopback service that runs on your personal computer. It enables the publicly hosted StudySloth web application (on Vercel) or the local companion app to connect to your locally running Ollama instance without ever transmitting your study notes, uploaded documents, or prompts to any remote cloud server.
 
 ---
 
-## 🛡️ Security Architecture
+## 🏗️ Architecture
 
-The bridge is designed with strict security constraints:
+```
+                                          ┌───────────────────────────────────────────────┐
+                                          │            Your Personal Computer             │
+┌───────────────────────────────┐         │                                               │
+│    Vercel Hosted Frontend     │  CORS   │  ┌─────────────────┐     HTTP     ┌─────────┐ │
+│  (https://<app>.vercel.app)   │ ──────> │  │  Local Bridge   │ ───────────> │ Ollama  │ │
+│              OR               │   PNA   │  │ 127.0.0.1:8765  │  (loopback)  │ :11434  │ │
+│   Local Companion Frontend    │         │  └─────────────────┘              └─────────┘ │
+│    (http://127.0.0.1:8765)    │         │                                               │
+└───────────────────────────────┘         └───────────────────────────────────────────────┘
+```
 
-1. **Loopback Only (`127.0.0.1`)**: Binds exclusively to `127.0.0.1:8765`. It never listens on `0.0.0.0` or public network adapters.
-2. **DNS Rebinding Protection**: Validates the `Host` header on every request against an exact loopback list (`127.0.0.1:8765`, `localhost:8765`). External hostnames are rejected with HTTP 400.
-3. **Strict Origin Enforcement**: Only requests bearing an approved `Origin` header (such as `https://studysloth-ai.vercel.app` or local development ports) are processed. Malicious third-party websites cannot query the bridge.
-4. **Short-Lived Pairing & Session Tokens**:
-   - On startup, the bridge displays an 8-character pairing code (e.g., `A7B2-C9D4`) valid for 5 minutes.
-   - When entered into the web app, the bridge exchanges it for a cryptographically secure 256-bit bearer token (`X-Bridge-Token`), stored only in the browser's temporary `sessionStorage`.
-   - Brute-force rate limiting: 5 failed attempts locks pairing for 60 seconds.
-5. **CSRF Immunity**: All data-processing endpoints require the custom header `X-Bridge-Token` and JSON/multipart content types. Standard HTML tags (`<form>`, `<img>`, `<script>`) cannot forge these headers.
-6. **No Arbitrary Proxying**: Only `/api/health`, `/api/extract`, `/api/generate`, `/api/pair`, and `/api/unpair` are exposed. Administrative Ollama endpoints (like model deletion or arbitrary shell commands) are strictly unreachable.
-7. **Zero Remote Data Storage**: Uploaded files and study notes are processed locally in memory. Nothing is ever written to disk or sent to Vercel.
+1. **Vercel Frontend**: Delivers the user interface (React + Vite) statically from CDN. No server-side storage, no backend database.
+2. **Local Bridge (`bridge/bridge.py`)**: Runs strictly on `127.0.0.1:8765`, enforcing authentication, DNS rebinding guards, rate limits, and document parsing.
+3. **Local Ollama**: Runs the open-weight model (`llama3.2:1b`) directly on your machine's CPU/GPU.
 
 ---
 
-## 🌐 Browser Security & Companion Mode
+## 🛡️ Security Features
 
-### The HTTPS-to-Loopback Challenge
-Modern web browsers enforce security policies when an `https://` site (like `https://studysloth-ai.vercel.app`) communicates with an `http://127.0.0.1` address:
-- **Chromium / Chrome / Edge**: Uses W3C **Private Network Access (PNA)**. The bridge sends `Access-Control-Allow-Private-Network: true` to satisfy this.
-- **Firefox & Safari**: Strictly block mixed content (`http://127.0.0.1` from `https://`) unless manually overridden in advanced browser flags.
+- **Loopback Exclusive (`127.0.0.1`)**: Binds only to `127.0.0.1`. It never listens on `0.0.0.0` or external network interfaces.
+- **DNS Rebinding Guard**: Validates the HTTP `Host` header on every request against loopback hosts (`127.0.0.1:8765`, `localhost:8765`). Requests from external or spoofed hostnames are rejected with HTTP 400.
+- **Strict Origin Enforcement**: Only requests from authorized origins (such as `https://studysloth-ai.vercel.app`, custom Vercel URLs, or local companion ports) are accepted.
+- **Ephemeral Pairing Codes**: Generates an 8-character code (`A7B2-C9D4`) with a 5-minute expiry. An attacker cannot guess this without triggering rate-limit lockouts (5 failed attempts locks for 60 seconds).
+- **Constant-Time Token Validation**: Validates session tokens using `hmac.compare_digest` to prevent timing attacks.
+- **CSRF Immunity**: Requires custom `X-Bridge-Token` headers for all data operations; standard browser cross-origin forms or images cannot forge this.
+- **No Disk Logging**: Prompts, notes, and generated study aids are processed exclusively in RAM and never written to disk.
 
-### 🌟 Universal Solution: Local Companion Mode
-To guarantee 100% compatibility across **all browsers** without configuring browser flags:
-```powershell
+---
+
+## 🌐 Browser Compatibility & Mixed Content
+
+| Browser | Hosted HTTPS App (`*.vercel.app`) | Companion App (`127.0.0.1:8765`) |
+| :--- | :---: | :---: |
+| **Google Chrome** | ✅ Supported (via W3C Private Network Access) | ✅ 100% Supported |
+| **Microsoft Edge** | ✅ Supported (via W3C Private Network Access) | ✅ 100% Supported |
+| **Brave / Opera** | ✅ Supported (via W3C Private Network Access) | ✅ 100% Supported |
+| **Mozilla Firefox** | ⚠️ Blocked by mixed content (HTTPS to HTTP) | ✅ 100% Supported |
+| **Apple Safari** | ⚠️ Blocked by mixed content (HTTPS to HTTP) | ✅ 100% Supported |
+
+> 💡 **Universal Companion Mode**: Firefox and Safari block HTTPS websites from querying HTTP loopback addresses. If you use Firefox or Safari, launch the bridge with `--open` (or use `start_bridge.bat` / `start_bridge.sh`). The bridge serves the complete web app directly from `http://127.0.0.1:8765` with zero mixed-content restrictions.
+
+---
+
+## 🚀 Quick Start for End Users
+
+### Step 1: Install Ollama & Download the Model
+1. Download Ollama from [ollama.com](https://ollama.com/download).
+2. Open your terminal and pull the recommended lightweight model:
+   ```bash
+   ollama pull llama3.2:1b
+   ```
+
+### Step 2: Start the Bridge
+
+#### Option A: One-Click Launchers (Recommended)
+- **Windows**: Double-click `start_bridge.bat` (or right-click `start_bridge.ps1` -> Run with PowerShell).
+- **macOS / Linux**: Open Terminal and run:
+  ```bash
+  chmod +x start_bridge.sh
+  ./start_bridge.sh
+  ```
+
+#### Option B: Manual Command Line
+Using the minimal dependencies (`requirements-bridge.txt`):
+```bash
+pip install -r requirements-bridge.txt
 python bridge/bridge.py --open
 ```
-The bridge automatically serves the production frontend build directly from `http://127.0.0.1:8765` and opens it in your default browser. This operates entirely within a first-party local context with zero mixed-content restrictions!
+
+### Step 3: Connect and Pair
+1. The bridge will print your terminal session code:
+   ```text
+   ================================================================
+    🦥 StudySloth AI Local Bridge Server
+   ================================================================
+    Status:             Running on http://127.0.0.1:8765
+    🔑 YOUR SESSION PAIRING CODE:  A7B2-C9D4
+   ================================================================
+   ```
+2. Open the StudySloth web app (on Vercel or at `http://127.0.0.1:8765`).
+3. Click **Connect to Local Ollama**, enter the 8-character pairing code, and click **Pair & Connect**.
 
 ---
 
-## 🚀 How to Run the Bridge
+## ⚙️ Configuring Custom Allowed Origins
 
-### Windows (PowerShell)
-```powershell
-# 1. Open PowerShell in the project directory:
-cd C:\Users\ADMIN\OneDrive\Desktop\studysloth
+When hosting your own frontend deployment on Vercel, you can authorize your domain in three ways:
 
-# 2. Ensure Ollama is running:
-ollama run llama3.2:1b
-
-# 3. Start the bridge:
-.\.venv\Scripts\python bridge/bridge.py
-```
-
-### macOS / Linux (Terminal)
-```bash
-# 1. Activate your virtual environment:
-source .venv/bin/activate
-
-# 2. Start the bridge:
-python bridge/bridge.py
-```
-
-### Custom Allowed Origin (for your Vercel URL)
-If your Vercel deployment has a custom URL:
+### 1. Command-Line Argument
 ```bash
 python bridge/bridge.py --allowed-origin https://your-project.vercel.app
 ```
+*(You can pass `--allowed-origin` multiple times or comma-separated).*
+
+### 2. Environment Variable
+- **PowerShell**:
+  ```powershell
+  $env:STUDYSLOTH_ALLOWED_ORIGIN="https://your-project.vercel.app"
+  python bridge/bridge.py
+  ```
+- **macOS / Linux**:
+  ```bash
+  export STUDYSLOTH_ALLOWED_ORIGIN="https://your-project.vercel.app"
+  python bridge/bridge.py
+  ```
+
+### 3. Local Configuration File (`.bridge_config.json`)
+Create a file named `.bridge_config.json` in the project root:
+```json
+{
+  "allowed_origins": [
+    "https://your-custom-domain.com",
+    "https://your-project.vercel.app"
+  ]
+}
+```
 
 ---
 
-## 🛑 How to Stop the Bridge
-Press `Ctrl + C` in the terminal where the bridge is running. The server terminates cleanly and immediately shuts down all active sessions.
+## 🛑 Stopping the Bridge
+Press `Ctrl + C` in the terminal where the bridge is running. The server terminates cleanly and immediately invalidates all active session tokens.

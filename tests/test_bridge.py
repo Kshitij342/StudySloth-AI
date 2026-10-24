@@ -12,6 +12,8 @@ from bridge.bridge import (
     BridgeSecurityManager,
     BridgeHTTPRequestHandler,
     create_bridge_handler,
+    normalize_origin,
+    get_configured_origins,
     DEFAULT_PORT,
     DEFAULT_HOST,
 )
@@ -96,6 +98,61 @@ def test_security_manager_session_revocation(security_manager):
 
     security_manager.revoke_session_token(token)
     assert security_manager.validate_session_token(token) is False
+
+
+def test_normalize_origin():
+    assert normalize_origin("https://studysloth-ai.vercel.app/") == "https://studysloth-ai.vercel.app"
+    assert normalize_origin("http://localhost:3000///") == "http://localhost:3000"
+    assert normalize_origin("  HTTPS://CUSTOM-DOMAIN.COM/  ") == "https://custom-domain.com"
+    assert normalize_origin("my-app.vercel.app") == "https://my-app.vercel.app"
+    assert normalize_origin("") == ""
+
+
+def test_get_configured_origins_env_and_cli(monkeypatch):
+    monkeypatch.setenv("STUDYSLOTH_ALLOWED_ORIGIN", "https://single-origin.vercel.app/")
+    monkeypatch.setenv("STUDYSLOTH_ALLOWED_ORIGINS", "https://multi1.com,https://multi2.org/")
+
+    origins = get_configured_origins(["https://cli-origin.vercel.app", "https://cli2.com,https://cli3.com"])
+    assert "https://single-origin.vercel.app" in origins
+    assert "https://multi1.com" in origins
+    assert "https://multi2.org" in origins
+    assert "https://cli-origin.vercel.app" in origins
+    assert "https://cli2.com" in origins
+    assert "https://cli3.com" in origins
+    assert "https://studysloth-ai.vercel.app" in origins
+
+
+def test_requirements_bridge_is_minimal():
+    import os
+    bridge_req_path = os.path.join(os.path.dirname(__file__), "..", "requirements-bridge.txt")
+    assert os.path.isfile(bridge_req_path)
+    with open(bridge_req_path, "r", encoding="utf-8") as f:
+        lines = [line.strip().lower() for line in f if line.strip() and not line.strip().startswith("#")]
+    assert any("requests" in l for l in lines)
+    assert any("pypdf" in l for l in lines)
+    assert any("python-docx" in l for l in lines)
+    # Crucial: Streamlit and dev dependencies must NOT be in minimal bridge requirements
+    assert not any("streamlit" in l for l in lines)
+    assert not any("pytest" in l for l in lines)
+
+
+def test_launch_scripts_exist():
+    import os
+    root = os.path.join(os.path.dirname(__file__), "..")
+    bat = os.path.join(root, "start_bridge.bat")
+    ps1 = os.path.join(root, "start_bridge.ps1")
+    sh = os.path.join(root, "start_bridge.sh")
+
+    assert os.path.isfile(bat)
+    assert os.path.isfile(ps1)
+    assert os.path.isfile(sh)
+
+    with open(bat, "r", encoding="utf-8") as f:
+        assert "bridge.py" in f.read()
+    with open(ps1, "r", encoding="utf-8") as f:
+        assert "bridge.py" in f.read()
+    with open(sh, "r", encoding="utf-8") as f:
+        assert "bridge.py" in f.read()
 
 
 # --- INTEGRATION TESTS WITH LIVE THREADED SERVER ---
@@ -273,4 +330,68 @@ def test_bridge_generate_offline_ollama(live_bridge_server):
     assert exc_info.value.code == 503
     err_data = json.loads(exc_info.value.read().decode("utf-8"))
     assert "Ollama is not running" in err_data["error"]
+
+
+def test_bridge_health_session_validation(live_bridge_server):
+    sec = live_bridge_server["security"]
+    code = sec.pairing_code
+    _, _, token = sec.verify_pairing_attempt(code, "https://studysloth-ai.vercel.app")
+
+    url = f"{live_bridge_server['base_url']}/api/health"
+
+    # 1. Health check with valid token
+    req_valid = urllib.request.Request(url, method="GET")
+    req_valid.add_header("Host", f"127.0.0.1:{live_bridge_server['port']}")
+    req_valid.add_header("Origin", "https://studysloth-ai.vercel.app")
+    req_valid.add_header("X-Bridge-Token", token)
+
+    with urllib.request.urlopen(req_valid) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["bridge_online"] is True
+        assert data["session_valid"] is True
+
+    # 2. Health check with invalid/expired token
+    req_invalid = urllib.request.Request(url, method="GET")
+    req_invalid.add_header("Host", f"127.0.0.1:{live_bridge_server['port']}")
+    req_invalid.add_header("Origin", "https://studysloth-ai.vercel.app")
+    req_invalid.add_header("X-Bridge-Token", "invalid-expired-token")
+
+    with urllib.request.urlopen(req_invalid) as resp:
+        assert resp.status == 200
+        data = json.loads(resp.read().decode("utf-8"))
+        assert data["bridge_online"] is True
+        assert data["session_valid"] is False
+
+
+def test_bridge_test_endpoint_auth_and_offline(live_bridge_server):
+    sec = live_bridge_server["security"]
+    code = sec.pairing_code
+    _, _, token = sec.verify_pairing_attempt(code, "https://studysloth-ai.vercel.app")
+
+    url = f"{live_bridge_server['base_url']}/api/test"
+    body = json.dumps({"model": "llama3.2:1b"}).encode("utf-8")
+
+    # 1. Without token -> 401 Unauthorized
+    req_no_auth = urllib.request.Request(url, data=body, method="POST")
+    req_no_auth.add_header("Host", f"127.0.0.1:{live_bridge_server['port']}")
+    req_no_auth.add_header("Origin", "https://studysloth-ai.vercel.app")
+    req_no_auth.add_header("Content-Type", "application/json")
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req_no_auth)
+    assert exc_info.value.code == 401
+
+    # 2. With token -> 503 (since dummy Ollama port is offline)
+    req_auth = urllib.request.Request(url, data=body, method="POST")
+    req_auth.add_header("Host", f"127.0.0.1:{live_bridge_server['port']}")
+    req_auth.add_header("Origin", "https://studysloth-ai.vercel.app")
+    req_auth.add_header("Content-Type", "application/json")
+    req_auth.add_header("X-Bridge-Token", token)
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req_auth)
+    assert exc_info.value.code == 503
+    data = json.loads(exc_info.value.read().decode("utf-8"))
+    assert "Ollama is not running" in data["error"]
 

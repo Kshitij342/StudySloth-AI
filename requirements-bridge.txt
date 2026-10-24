@@ -1,0 +1,6 @@
+# StudySloth AI - Minimal Local Bridge Dependencies
+# Only required for running bridge/bridge.py (no Streamlit or dev tools needed)
+
+requests>=2.31.0
+pypdf>=4.2.0
+python-docx>=1.1.0

@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 # Reconfigure stdout/stderr on Windows to avoid charmap UnicodeEncodeErrors
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -59,6 +59,7 @@ from utils.document_processor import (
 from utils.ollama_client import (
     check_ollama_status,
     generate_text_stream,
+    generate_text_sync,
     DEFAULT_OLLAMA_URL,
     DEFAULT_MODEL,
     RECOMMENDED_MODELS,
@@ -80,6 +81,82 @@ DEFAULT_ALLOWED_ORIGINS = {
 
 # Path to static frontend dist if built
 FRONTEND_DIST_DIR = os.path.join(PROJECT_ROOT, "web", "dist")
+
+
+def normalize_origin(raw_origin: str) -> str:
+    """Normalizes an origin string by trimming whitespace, trailing slashes,
+    and enforcing lowercase scheme and authority (e.g. 'https://foo.vercel.app').
+    """
+    if not raw_origin:
+        return ""
+    origin = raw_origin.strip()
+    if not origin:
+        return ""
+    origin_lower = origin.lower()
+    if not origin_lower.startswith("http://") and not origin_lower.startswith("https://"):
+        origin = f"https://{origin}"
+    parsed = urllib.parse.urlparse(origin)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    return f"{scheme}://{netloc}"
+
+
+def get_configured_origins(cli_allowed_origins: Optional[List[str]] = None) -> Set[str]:
+    """Collects and normalizes allowed origins from defaults, environment variables,
+    optional local configuration file (.bridge_config.json), and CLI arguments.
+    """
+    origins = {normalize_origin(o) for o in DEFAULT_ALLOWED_ORIGINS if o}
+
+    # 1. Environment variable: STUDYSLOTH_ALLOWED_ORIGIN (single or comma-separated)
+    env_single = os.getenv("STUDYSLOTH_ALLOWED_ORIGIN")
+    if env_single:
+        for item in env_single.split(","):
+            norm = normalize_origin(item)
+            if norm:
+                origins.add(norm)
+
+    # 2. Environment variable: STUDYSLOTH_ALLOWED_ORIGINS (comma-separated list)
+    env_multi = os.getenv("STUDYSLOTH_ALLOWED_ORIGINS")
+    if env_multi:
+        for item in env_multi.split(","):
+            norm = normalize_origin(item)
+            if norm:
+                origins.add(norm)
+
+    # 3. Optional local configuration file .bridge_config.json
+    config_paths = [
+        os.path.join(os.getcwd(), ".bridge_config.json"),
+        os.path.join(PROJECT_ROOT, ".bridge_config.json"),
+    ]
+    for cfg_path in config_paths:
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg_data = json.load(f)
+                    cfg_origins = cfg_data.get("allowed_origins", [])
+                    if isinstance(cfg_origins, list):
+                        for item in cfg_origins:
+                            norm = normalize_origin(str(item))
+                            if norm:
+                                origins.add(norm)
+                    elif isinstance(cfg_origins, str):
+                        for item in cfg_origins.split(","):
+                            norm = normalize_origin(item)
+                            if norm:
+                                origins.add(norm)
+            except Exception:
+                pass
+
+    # 4. CLI arguments (list of strings, may contain comma-separated origins)
+    if cli_allowed_origins:
+        for item in cli_allowed_origins:
+            if isinstance(item, str):
+                for sub_item in item.split(","):
+                    norm = normalize_origin(sub_item)
+                    if norm:
+                        origins.add(norm)
+
+    return origins
 
 
 class SessionInfo:
@@ -142,8 +219,8 @@ class BridgeSecurityManager:
         if not origin:
             # Same-origin local requests (e.g. companion app served from 127.0.0.1)
             return True
-        clean_origin = origin.rstrip("/").lower()
-        return clean_origin in {o.rstrip("/").lower() for o in self.allowed_origins}
+        clean_origin = normalize_origin(origin)
+        return clean_origin in self.allowed_origins
 
     def verify_pairing_attempt(self, candidate_code: str, origin: str) -> Tuple[bool, str, Optional[str]]:
         """Verifies pairing code with rate limiting."""
@@ -297,6 +374,12 @@ class BridgeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if not self._check_security(require_token=False):
                 return
             
+            # Optional session token validation if client provided one
+            token = self.headers.get("X-Bridge-Token")
+            session_valid = None
+            if token:
+                session_valid = self.security_manager.validate_session_token(token)
+
             # Query local Ollama
             is_online, status_msg, models = check_ollama_status(self.ollama_url, timeout=2.0)
             has_recommended = DEFAULT_MODEL in models
@@ -311,6 +394,7 @@ class BridgeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 "default_model": DEFAULT_MODEL,
                 "default_model_available": has_recommended,
                 "recommended_specs": RECOMMENDED_MODELS.get(DEFAULT_MODEL, {}),
+                "session_valid": session_valid,
             })
             return
 
@@ -503,12 +587,95 @@ class BridgeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json(500, {"error": str(err)})
                 return
 
+        # 5. Live Connection Test endpoint
+        if path == "/api/test":
+            body_bytes = self.rfile.read(content_length)
+            model = DEFAULT_MODEL
+            if body_bytes:
+                try:
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                    model = payload.get("model", DEFAULT_MODEL)
+                except Exception:
+                    pass
+
+            is_online, _, models = check_ollama_status(self.ollama_url, timeout=2.0)
+            if not is_online:
+                self._send_json(503, {
+                    "status": "error",
+                    "error": "Ollama is not running locally. Please start it with 'ollama serve' or open the Ollama app."
+                })
+                return
+
+            if models and model not in models:
+                self._send_json(404, {
+                    "status": "error",
+                    "error": f"Model '{model}' is not installed in your Ollama library. Run 'ollama pull {model}'."
+                })
+                return
+
+            start_t = time.time()
+            try:
+                test_prompt = "Hello! In 1 short sentence, confirm that StudySloth local AI is connected."
+                res = generate_text_sync(
+                    prompt=test_prompt,
+                    system_prompt="You are StudySloth AI, a private local study assistant. Respond briefly in one short sentence.",
+                    model=model,
+                    base_url=self.ollama_url,
+                    temperature=0.1,
+                    timeout=25.0,
+                )
+                elapsed_ms = int((time.time() - start_t) * 1000)
+                self._send_json(200, {
+                    "status": "success",
+                    "model": model,
+                    "latency_ms": elapsed_ms,
+                    "reply": res.strip(),
+                })
+            except OllamaClientError as err:
+                self._send_json(500, {"status": "error", "error": str(err)})
+            except Exception as exc:
+                self._send_json(500, {"status": "error", "error": f"Test failed: {str(exc)}"})
+            return
+
         self._send_json(404, {"error": f"Endpoint '{path}' not found."})
 
     def _serve_static_frontend(self, path: str) -> bool:
         """Serves built static web frontend from web/dist for local companion mode."""
-        if not os.path.isdir(FRONTEND_DIST_DIR):
-            return False
+        index_file = os.path.join(FRONTEND_DIST_DIR, "index.html")
+        if not os.path.isfile(index_file):
+            # If web/dist is not built yet, display a helpful diagnostic page rather than a blank 404
+            diagnostic_html = (
+                "<!DOCTYPE html>"
+                "<html><head><meta charset='utf-8'><title>StudySloth AI Local Bridge</title>"
+                "<style>"
+                "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; "
+                "background: #f4f7f4; color: #233d26; padding: 2rem; display: flex; justify-content: center; align-items: center; min-height: 80vh; margin: 0; }"
+                ".card { background: white; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); padding: 2rem; max-width: 580px; width: 100%; border: 1px solid #d4ded5; }"
+                "h1 { color: #1f4d2b; font-size: 1.4rem; margin-top: 0; display: flex; align-items: center; gap: 0.5rem; }"
+                ".badge { display: inline-block; background: #e8f5e9; color: #2e7d32; padding: 0.25rem 0.6rem; border-radius: 20px; font-weight: 600; font-size: 0.8rem; margin-bottom: 1rem; }"
+                "code { background: #eef3ef; padding: 0.2rem 0.45rem; border-radius: 4px; font-size: 0.9em; color: #1b4d24; font-weight: 600; }"
+                ".box { background: #fbfdfb; border: 1px solid #e0eae1; border-radius: 8px; padding: 1rem; margin: 1rem 0; }"
+                "</style></head><body>"
+                "<div class='card'>"
+                "<h1>🦥 StudySloth AI Local Bridge</h1>"
+                "<span class='badge'>🟢 Loopback Service Active on 127.0.0.1:8765</span>"
+                "<p>Your local AI bridge is active and ready to process notes from your hosted Vercel website or companion app.</p>"
+                "<div class='box'>"
+                "<p style='margin:0 0 0.5rem 0;font-weight:600;'>To enable the Local Companion App at this URL:</p>"
+                "<p style='margin:0 0 0.5rem 0;font-size:0.88rem;color:#555;'>Build the frontend assets once using Node.js:</p>"
+                "<code>cd web && npm run build</code>"
+                "</div>"
+                "<p style='font-size:0.85rem;color:#666;margin-bottom:0;'>If you are using the public website on Vercel, open your Vercel URL and enter your pairing code from the terminal.</p>"
+                "</div></body></html>"
+            ).encode("utf-8")
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(diagnostic_html)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(diagnostic_html)
+            return True
 
         if path in ("", "/"):
             file_path = os.path.join(FRONTEND_DIST_DIR, "index.html")
@@ -555,13 +722,17 @@ def create_bridge_handler(security_manager: BridgeSecurityManager, ollama_url: s
 def run_bridge(
     port: int = DEFAULT_PORT,
     ollama_url: str = DEFAULT_OLLAMA_URL,
-    allowed_origin: Optional[str] = None,
+    allowed_origin: Optional[Union[str, List[str]]] = None,
     open_browser: bool = False,
 ):
     """Starts the StudySloth AI local bridge server."""
-    origins = set(DEFAULT_ALLOWED_ORIGINS)
-    if allowed_origin:
-        origins.add(allowed_origin.rstrip("/"))
+    cli_origins: List[str] = []
+    if isinstance(allowed_origin, list):
+        cli_origins.extend(allowed_origin)
+    elif isinstance(allowed_origin, str):
+        cli_origins.append(allowed_origin)
+
+    origins = get_configured_origins(cli_origins)
 
     security = BridgeSecurityManager(origins, port)
     handler_class = create_bridge_handler(security, ollama_url)
@@ -610,7 +781,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StudySloth AI Secure Local Bridge")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to bind (default: {DEFAULT_PORT})")
     parser.add_argument("--ollama-url", type=str, default=DEFAULT_OLLAMA_URL, help="Ollama local URL")
-    parser.add_argument("--allowed-origin", type=str, default=None, help="Additional production website origin to allow")
+    parser.add_argument(
+        "--allowed-origin",
+        type=str,
+        action="append",
+        default=None,
+        help="Additional production website origin(s) to allow (can be specified multiple times or comma-separated, or set via STUDYSLOTH_ALLOWED_ORIGIN)",
+    )
     parser.add_argument("--open", action="store_true", help="Automatically open browser to local companion app")
     args = parser.parse_args()
 

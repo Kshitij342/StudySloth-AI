@@ -1,4 +1,4 @@
-"""StudySloth AI - Hacktoberfest 2026: Slow & Steady Edition
+"""StudySloth AI - Private, On-Device AI Study Assistant
 A 100% local, private, open-weight AI study companion built with Streamlit and Ollama.
 """
 
@@ -30,7 +30,7 @@ from utils.samples import SAMPLE_NOTES
 
 # Configure page layout and metadata
 st.set_page_config(
-    page_title="StudySloth AI | Slow & Steady Local Learning",
+    page_title="StudySloth AI | Private On-Device AI Study Assistant",
     page_icon="🦥",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -84,7 +84,7 @@ CUSTOM_CSS = """
         font-size: 1.05rem;
     }
 
-    .hacktoberfest-badge {
+    .brand-badge {
         display: inline-block;
         background: #2E6F40;
         color: #FFFFFF !important;
@@ -299,7 +299,7 @@ st.markdown(
         <div class="main-title-text">
             <h1>StudySloth AI</h1>
             <p>Slow and steady wins the race. 100% Local, Private, AI-Powered Study Assistant.</p>
-            <span class="hacktoberfest-badge">Hacktoberfest 2026 • Week 3: Slow and Steady</span>
+            <span class="brand-badge">100% Private • Local Open-Weight AI</span>
         </div>
     </div>
     """,
@@ -778,7 +778,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style="text-align: center; color: #5C8354; font-size: 0.85rem; padding: 1.5rem 0;">
-        🦥 <b>StudySloth AI</b> • Built with Python, Streamlit, and Ollama for <b>Hacktoberfest 2026: Slow and Steady</b>.<br>
+        🦥 <b>StudySloth AI</b> • Built with Python, Streamlit, and Ollama.<br>
         <i>100% Open Source • 100% Local Inference • Zero Data Tracking</i>
     </div>
     """,
