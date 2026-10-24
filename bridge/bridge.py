@@ -537,10 +537,11 @@ class BridgeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.send_header("X-Accel-Buffering", "no")
                 self._set_cors_headers()
                 self.end_headers()
+                self.close_connection = True
 
                 try:
                     for chunk in generate_text_stream(
@@ -558,14 +559,23 @@ class BridgeHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     done_msg = f"data: {json.dumps({'done': True})}\n\n"
                     self.wfile.write(done_msg.encode("utf-8"))
                     self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Client disconnected or aborted stream
+                    return
                 except OllamaClientError as err:
-                    err_msg = f"data: {json.dumps({'error': str(err)})}\n\n"
-                    self.wfile.write(err_msg.encode("utf-8"))
-                    self.wfile.flush()
+                    try:
+                        err_msg = f"data: {json.dumps({'error': str(err)})}\n\n"
+                        self.wfile.write(err_msg.encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        pass
                 except Exception as exc:
-                    err_msg = f"data: {json.dumps({'error': f'Generation error: {str(exc)}'})}\n\n"
-                    self.wfile.write(err_msg.encode("utf-8"))
-                    self.wfile.flush()
+                    try:
+                        err_msg = f"data: {json.dumps({'error': f'Generation error: {str(exc)}'})}\n\n"
+                        self.wfile.write(err_msg.encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        pass
                 return
             else:
                 # Non-streaming fallback

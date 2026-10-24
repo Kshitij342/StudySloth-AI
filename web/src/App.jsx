@@ -54,6 +54,7 @@ export default function App() {
   const [generationOutput, setGenerationOutput] = useState('');
   const [generationError, setGenerationError] = useState('');
   const [isSimulatedResponse, setIsSimulatedResponse] = useState(false);
+  const abortControllerRef = useRef(null);
 
   // Interactive Practice State
   const [activeResultTab, setActiveResultTab] = useState('formatted'); // 'formatted' | 'interactive'
@@ -288,11 +289,23 @@ export default function App() {
     }
   };
 
+  const handleCancelGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsGenerating(false);
+  };
+
   const handleGenerate = async () => {
     const trimmedNotes = notes.trim();
     if (!trimmedNotes || trimmedNotes.length < 25) {
       setGenerationError('Please provide at least 25 characters of study notes to generate aids.');
       return;
+    }
+
+    if (isGenerating) {
+      return; // Prevent duplicate concurrent requests
     }
 
     setIsGenerating(true);
@@ -308,8 +321,11 @@ export default function App() {
     // Fallback: Simulated demo mode if bridge offline and user enabled it
     if (!sessionToken && allowSimulated) {
       setIsSimulatedResponse(true);
-      await generateSimulatedStudyAid(trimmedNotes, selectedFormat);
-      setIsGenerating(false);
+      try {
+        await generateSimulatedStudyAid(trimmedNotes, selectedFormat);
+      } finally {
+        setIsGenerating(false);
+      }
       return;
     }
 
@@ -319,9 +335,14 @@ export default function App() {
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    let reader = null;
+
     try {
       const res = await fetch(`${bridgeUrl.replace(/\/$/, '')}/api/generate`, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           'X-Bridge-Token': sessionToken,
@@ -340,41 +361,104 @@ export default function App() {
         throw new Error(errJson.error || `Generation failed (HTTP ${res.status})`);
       }
 
-      const reader = res.body.getReader();
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (data.output) {
+          setGenerationOutput(data.output);
+        } else {
+          throw new Error('Received empty response from the local bridge.');
+        }
+        return;
+      }
+
+      if (!res.body) {
+        throw new Error('Response body is empty. Could not read stream.');
+      }
+
+      reader = res.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let accumulated = '';
       let buffer = '';
+      let streamFinished = false;
 
-      while (true) {
+      while (!streamFinished) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done) {
+          buffer += decoder.decode();
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6).trim();
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6).trim();
             if (!jsonStr) continue;
+            let parsed;
             try {
-              const parsed = JSON.parse(jsonStr);
-              if (parsed.chunk) {
-                accumulated += parsed.chunk;
-                setGenerationOutput(accumulated);
-              }
-              if (parsed.error) {
-                throw new Error(parsed.error);
-              }
+              parsed = JSON.parse(jsonStr);
             } catch (pErr) {
-              // Ignore line parse edge cases
+              continue;
+            }
+
+            if (parsed.error) {
+              throw new Error(parsed.error);
+            }
+            if (parsed.chunk) {
+              accumulated += parsed.chunk;
+              setGenerationOutput(accumulated);
+            }
+            if (parsed.done) {
+              streamFinished = true;
+              break;
             }
           }
         }
       }
+
+      // Flush any remaining line in buffer
+      if (buffer.trim()) {
+        const trimmed = buffer.trim();
+        if (trimmed.startsWith('data: ')) {
+          const jsonStr = trimmed.slice(6).trim();
+          if (jsonStr) {
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.error) throw new Error(parsed.error);
+              if (parsed.chunk) {
+                accumulated += parsed.chunk;
+                setGenerationOutput(accumulated);
+              }
+            } catch (e) {
+              if (e.message && e.message.includes('error')) throw e;
+            }
+          }
+        }
+      }
+
+      if (!accumulated.trim()) {
+        throw new Error('Generation completed, but the AI output was empty. Please check that your Ollama model is functioning.');
+      }
     } catch (err) {
-      setGenerationError(err.message);
+      if (err.name === 'AbortError') {
+        setGenerationError('Generation was stopped.');
+      } else {
+        setGenerationError(err.message || 'An error occurred during generation.');
+      }
     } finally {
+      if (reader) {
+        try {
+          reader.releaseLock();
+        } catch (e) {
+          // Ignore if already released or closed
+        }
+      }
+      abortControllerRef.current = null;
       setIsGenerating(false);
     }
   };
@@ -1051,14 +1135,26 @@ export default function App() {
               </div>
 
               <div>
-                <button
-                  className="btn btn-primary"
-                  style={{ width: '100%', padding: '0.75rem' }}
-                  onClick={handleGenerate}
-                  disabled={isGenerating || notes.trim().length < 25}
-                >
-                  {isGenerating ? '🦥 Generating Patiently...' : '🦥 Generate with StudySloth'}
-                </button>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ flex: 1, padding: '0.75rem' }}
+                    onClick={handleGenerate}
+                    disabled={isGenerating || notes.trim().length < 25}
+                  >
+                    {isGenerating ? '🦥 Generating Patiently...' : '🦥 Generate with StudySloth'}
+                  </button>
+                  {isGenerating && (
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: '0.75rem 1rem', whiteSpace: 'nowrap' }}
+                      onClick={handleCancelGeneration}
+                      title="Stop generating"
+                    >
+                      ⏹️ Stop
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

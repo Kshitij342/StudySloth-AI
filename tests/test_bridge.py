@@ -395,3 +395,42 @@ def test_bridge_test_endpoint_auth_and_offline(live_bridge_server):
     data = json.loads(exc_info.value.read().decode("utf-8"))
     assert "Ollama is not running" in data["error"]
 
+
+def test_bridge_streaming_generate_headers_and_close(live_bridge_server, monkeypatch):
+    import bridge.bridge as bridge_mod
+
+    # Mock Ollama status online with default model
+    monkeypatch.setattr(bridge_mod, "check_ollama_status", lambda url, timeout: (True, "mock", ["llama3.2:1b"]))
+    # Mock text stream returning 2 chunks
+    monkeypatch.setattr(
+        bridge_mod,
+        "generate_text_stream",
+        lambda prompt, system_prompt, model, base_url, temperature, timeout=120.0: ["Chunk 1 ", "Chunk 2."],
+    )
+
+    sec = live_bridge_server["security"]
+    code = sec.pairing_code
+    _, _, token = sec.verify_pairing_attempt(code, "https://studysloth-ai.vercel.app")
+
+    url = f"{live_bridge_server['base_url']}/api/generate"
+    body = json.dumps({
+        "notes": "Test study notes about mitochondria being the powerhouse of the cell.",
+        "output_type": "summary",
+        "stream": True,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Host", f"127.0.0.1:{live_bridge_server['port']}")
+    req.add_header("Origin", "https://studysloth-ai.vercel.app")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Bridge-Token", token)
+
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
+        assert resp.headers.get("Connection", "").lower() == "close"
+        content = resp.read().decode("utf-8")
+        assert 'data: {"chunk": "Chunk 1 "}' in content
+        assert 'data: {"chunk": "Chunk 2."}' in content
+        assert 'data: {"done": true}' in content
+
